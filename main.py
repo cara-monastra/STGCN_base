@@ -7,6 +7,7 @@
 # @Github   : https://github.com/VeritasYin/Project_Orion
 
 import os
+import random
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from os.path import join as pjoin
