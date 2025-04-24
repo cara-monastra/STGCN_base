@@ -16,25 +16,25 @@ import time
 
 
 def model_train(inputs, blocks, args, sum_path='./output/tensorboard'):
-    '''
+    """
     Train the base model.
     :param inputs: instance of class Dataset, data source for training.
     :param blocks: list, channel configs of st_conv blocks.
     :param args: instance of class argparse, args for training.
-    '''
+    """
     n, n_his, n_pred = args.n_route, args.n_his, args.n_pred
     Ks, Kt = args.ks, args.kt
     batch_size, epoch, inf_mode, opt = args.batch_size, args.epoch, args.inf_mode, args.opt
 
-    # Placeholder for model training
-    x = tf.placeholder(tf.float32, [None, n_his + 1, n, 1], name='data_input')
-    keep_prob = tf.placeholder(tf.float32, name='keep_prob')
+    # Placeholders for model training
+    x = tf.compat.v1.placeholder(tf.float32, [None, n_his + 1, n, 1], name='data_input')
+    keep_prob = tf.compat.v1.placeholder(tf.float32, name='keep_prob')
 
     # Define model loss
     train_loss, pred = build_model(x, n_his, Ks, Kt, blocks, keep_prob)
-    tf.summary.scalar('train_loss', train_loss)
-    copy_loss = tf.add_n(tf.get_collection('copy_loss'))
-    tf.summary.scalar('copy_loss', copy_loss)
+    tf.compat.v1.summary.scalar('train_loss', train_loss)
+    copy_loss = tf.compat.v1.add_n(tf.compat.v1.get_collection('copy_loss'))
+    tf.compat.v1.summary.scalar('copy_loss', copy_loss)
 
     # Learning rate settings
     global_steps = tf.Variable(0, trainable=False)
@@ -44,22 +44,22 @@ def model_train(inputs, blocks, args, sum_path='./output/tensorboard'):
     else:
         epoch_step = int(len_train / batch_size) + 1
     # Learning rate decay with rate 0.7 every 5 epochs.
-    lr = tf.train.exponential_decay(args.lr, global_steps, decay_steps=5 * epoch_step, decay_rate=0.7, staircase=True)
-    tf.summary.scalar('learning_rate', lr)
-    step_op = tf.assign_add(global_steps, 1)
+    lr = tf.compat.v1.train.exponential_decay(args.lr, global_steps, decay_steps=5 * epoch_step, decay_rate=0.7, staircase=True)
+    tf.compat.v1.summary.scalar('learning_rate', lr)
+    step_op = tf.compat.v1.assign_add(global_steps, 1)
     with tf.control_dependencies([step_op]):
         if opt == 'RMSProp':
-            train_op = tf.train.RMSPropOptimizer(lr).minimize(train_loss)
+            train_op = tf.compat.v1.train.RMSPropOptimizer(lr).minimize(train_loss)
         elif opt == 'ADAM':
-            train_op = tf.train.AdamOptimizer(lr).minimize(train_loss)
+            train_op = tf.compat.v1.train.AdamOptimizer(lr).minimize(train_loss)
         else:
             raise ValueError(f'ERROR: optimizer "{opt}" is not defined.')
 
-    merged = tf.summary.merge_all()
+    merged = tf.compat.v1.summary.merge_all()
 
-    with tf.Session() as sess:
-        writer = tf.summary.FileWriter(pjoin(sum_path, 'train'), sess.graph)
-        sess.run(tf.global_variables_initializer())
+    with tf.compat.v1.Session() as sess:
+        writer = tf.compat.v1.summary.FileWriter(pjoin(sum_path, 'train'), sess.graph)
+        sess.run(tf.compat.v1.global_variables_initializer())
 
         if inf_mode == 'sep':
             # for inference mode 'sep', the type of step index is int.
@@ -77,18 +77,17 @@ def model_train(inputs, blocks, args, sum_path='./output/tensorboard'):
             start_time = time.time()
             for j, x_batch in enumerate(
                     gen_batch(inputs.get_data('train'), batch_size, dynamic_batch=True, shuffle=True)):
-                summary, _ = sess.run([merged, train_op], feed_dict={x: x_batch[:, 0:n_his + 1, :, :], keep_prob: 1.0})
+                summary, _ = sess.run([merged, train_op],
+                                      feed_dict={x: x_batch[:, 0:n_his + 1, :, :], keep_prob: 1.0})
                 writer.add_summary(summary, i * epoch_step + j)
                 if j % 50 == 0:
-                    loss_value = \
-                        sess.run([train_loss, copy_loss],
-                                 feed_dict={x: x_batch[:, 0:n_his + 1, :, :], keep_prob: 1.0})
+                    loss_value = sess.run([train_loss, copy_loss],
+                                          feed_dict={x: x_batch[:, 0:n_his + 1, :, :], keep_prob: 1.0})
                     print(f'Epoch {i:2d}, Step {j:3d}: [{loss_value[0]:.3f}, {loss_value[1]:.3f}]')
             print(f'Epoch {i:2d} Training Time {time.time() - start_time:.3f}s')
 
             start_time = time.time()
-            min_va_val, min_val = \
-                model_inference(sess, pred, inputs, batch_size, n_his, n_pred, step_idx, min_va_val, min_val)
+            min_va_val, min_val = model_inference(sess, pred, inputs, batch_size, n_his, n_pred, step_idx, min_va_val, min_val)
 
             for ix in tmp_idx:
                 va, te = min_va_val[ix - 2:ix + 1], min_val[ix - 2:ix + 1]
