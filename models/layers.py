@@ -2,39 +2,25 @@ import tensorflow as tf
 import math
 
 
-# Spectral Graph Convolution (Chebyshev)
+# Spectral Graph Convolution
 
 def gconv(x, theta, Ks, c_in, c_out):
-    """
-    Spectral-based graph convolution using precomputed Chebyshev polynomials.
-    :param x: tensor, [batch_size, n_route, c_in]
-    :param theta: tensor, [Ks * c_in, c_out]
-    :param Ks: int, polynomial order
-    :param c_in: int, input channels
-    :param c_out: int, output channels
-    """
-    kernel = tf.compat.v1.get_collection('graph_kernel')[0]  # [n_route, Ks * n_route]
+    kernel = tf.compat.v1.get_collection('graph_kernel')[0]  # [N, Ks*N]
     n = tf.shape(kernel)[0]
-    x_tmp = tf.reshape(tf.transpose(x, [0, 2, 1]), [-1, n])        # [B*c_in, n_route]
-    x_mul = tf.reshape(tf.matmul(x_tmp, kernel), [-1, c_in, Ks, n]) # [B, c_in, Ks, n_route]
+    x_tmp = tf.reshape(tf.transpose(x, [0, 2, 1]), [-1, n])        # [B*c_in, N]
+    x_mul = tf.reshape(tf.matmul(x_tmp, kernel), [-1, c_in, Ks, n]) # [B, c_in, Ks, N]
     x_ker = tf.reshape(tf.transpose(x_mul, [0, 3, 1, 2]), [-1, c_in * Ks])
-    x_gconv = tf.reshape(tf.matmul(x_ker, theta), [-1, n, c_out])  # [B, n_route, c_out]
+    x_gconv = tf.reshape(tf.matmul(x_ker, theta), [-1, n, c_out])  # [B, N, c_out]
     return x_gconv
-
 
 # Layer Normalization
 
 def layer_norm(x, scope):
-    """
-    Layer normalization over channel dimension.
-    :param x: tensor, [..., channels]
-    :param scope: variable scope
-    """
     with tf.compat.v1.variable_scope(scope):
         mu, sigma = tf.nn.moments(x, axes=[-1], keepdims=True)
         C = x.get_shape().as_list()[-1]
         gamma = tf.compat.v1.get_variable('gamma', initializer=tf.ones([C]))
-        beta = tf.compat.v1.get_variable('beta', initializer=tf.zeros([C]))
+        beta  = tf.compat.v1.get_variable('beta',  initializer=tf.zeros([C]))
         x_norm = (x - mu) / tf.sqrt(sigma + 1e-6)
         return gamma * x_norm + beta
 
@@ -42,118 +28,98 @@ def layer_norm(x, scope):
 # Temporal Convolution 
 
 def temporal_conv_layer(x, Kt, c_in, c_out, act_func='relu'):
-    _, T, n, _ = x.get_shape().as_list()
-    # Residual adjustment for channel mismatch
+    _, T, N, _ = x.get_shape().as_list()
+    # Residual channel match
     if c_in > c_out:
-        w_in = tf.compat.v1.get_variable('wt_input', shape=[1, 1, c_in, c_out])
+        w_in = tf.compat.v1.get_variable('wt_input', shape=[1,1,c_in,c_out])
         tf.compat.v1.add_to_collection('weight_decay', tf.nn.l2_loss(w_in))
-        x_input = tf.nn.conv2d(x, w_in, strides=[1, 1, 1, 1], padding='SAME')
+        x_input = tf.nn.conv2d(x, w_in, [1,1,1,1], 'SAME')
     elif c_in < c_out:
-        x_input = tf.concat([x, tf.zeros([tf.shape(x)[0], T, n, c_out - c_in])], axis=-1)
+        pad = c_out - c_in
+        x_input = tf.concat([x, tf.zeros([tf.shape(x)[0],T,N,pad])], axis=-1)
     else:
         x_input = x
-    x_input = x_input[:, Kt - 1:T, :, :]
+    x_input = x_input[:, Kt-1:T, :, :]
 
     if act_func == 'GLU':
-        wt = tf.compat.v1.get_variable('wt', shape=[Kt, 1, c_in, 2 * c_out])
+        wt = tf.compat.v1.get_variable('wt', shape=[Kt,1,c_in,2*c_out])
+        bt = tf.compat.v1.get_variable('bt', initializer=tf.zeros([2*c_out]))
         tf.compat.v1.add_to_collection('weight_decay', tf.nn.l2_loss(wt))
-        bt = tf.compat.v1.get_variable('bt', initializer=tf.zeros([2 * c_out]))
-        x_conv = tf.nn.conv2d(x, wt, strides=[1, 1, 1, 1], padding='VALID') + bt
-        return (x_conv[..., :c_out] + x_input) * tf.nn.sigmoid(x_conv[..., c_out:])
+        conv = tf.nn.conv2d(x, wt, [1,1,1,1], 'VALID') + bt
+        return (conv[..., :c_out] + x_input) * tf.nn.sigmoid(conv[..., c_out:])
     else:
-        wt = tf.compat.v1.get_variable('wt', shape=[Kt, 1, c_in, c_out])
-        tf.compat.v1.add_to_collection('weight_decay', tf.nn.l2_loss(wt))
+        wt = tf.compat.v1.get_variable('wt', shape=[Kt,1,c_in,c_out])
         bt = tf.compat.v1.get_variable('bt', initializer=tf.zeros([c_out]))
-        x_conv = tf.nn.conv2d(x, wt, strides=[1, 1, 1, 1], padding='VALID') + bt
+        tf.compat.v1.add_to_collection('weight_decay', tf.nn.l2_loss(wt))
+        conv = tf.nn.conv2d(x, wt, [1,1,1,1], 'VALID') + bt
         if act_func == 'linear':
-            return x_conv
-        elif act_func == 'sigmoid':
-            return tf.nn.sigmoid(x_conv)
-        elif act_func == 'relu':
-            return tf.nn.relu(x_conv + x_input)
-        else:
-            raise ValueError(f'Activation {act_func} not supported')
+            return conv
+        if act_func == 'sigmoid':
+            return tf.nn.sigmoid(conv)
+        if act_func == 'relu':
+            return tf.nn.relu(conv + x_input)
+        raise ValueError(f'Unsupported act_func "{act_func}"')
+
 
 # Temporal Self-Attention
 
 def temporal_self_attention_layer(x, d_model, keep_prob, scope='temp_att'):
-    """
-    Self-attention along the time dimension for each node.
-    :param x: [B, T, N, C] where C == d_model
-    """
     with tf.compat.v1.variable_scope(scope):
-        B = tf.shape(x)[0]
-        T = tf.shape(x)[1]
-        N = tf.shape(x)[2]
+        B = tf.shape(x)[0]; T = tf.shape(x)[1]; N = tf.shape(x)[2]
         C = x.get_shape().as_list()[3]
         x_in = x
-        x_flat = tf.reshape(x, [B * N, T, C])
-        Q = tf.compat.v1.layers.dense(x_flat, d_model, name='q')
-        K = tf.compat.v1.layers.dense(x_flat, d_model, name='k')
-        V = tf.compat.v1.layers.dense(x_flat, d_model, name='v')
-
-        # Numerical stability: scale + clip scores
-        eps = 1e-8
-        scores = tf.matmul(Q, K, transpose_b=True) / tf.sqrt(tf.cast(d_model, tf.float32) + eps)
-        scores = tf.clip_by_value(scores, -1e9, 1e9)
-
-        weights = tf.nn.softmax(scores, axis=-1)
-        weights = tf.clip_by_value(weights, 0.0, 1.0)
-        weights = tf.debugging.check_numerics(
-            weights,
-            message=f"{scope}/temporal_attention_weights contains NaN or Inf"
-        )
-        tf.compat.v1.summary.histogram(f'{scope}/temporal_attention_weights', weights)
-
-        attn = tf.matmul(weights, V)
-        attn = tf.reshape(attn, [B, N, T, d_model])
-        attn = tf.transpose(attn, [0, 2, 1, 3])
-
-        out = attn + x_in
-        out = layer_norm(out, scope + '_ln')
-        return tf.nn.dropout(out, keep_prob)
-
-
-# Graph Attention (Masked by adjacency)
-
-def graph_attention_layer(x, d_model, keep_prob, scope='graph_att'):
-    """
-    Attention over neighboring nodes via adjacency mask.
-    :param x: [B, T, N, C]
-    """
-    with tf.compat.v1.variable_scope(scope):
-        B = tf.shape(x)[0]
-        T = tf.shape(x)[1]
-        N = tf.shape(x)[2]
-        C = x.get_shape().as_list()[3]
-        x_in = x
-        flat = tf.reshape(x, [B * T, N, C])
+        flat = tf.reshape(x, [B*N, T, C])
         Q = tf.compat.v1.layers.dense(flat, d_model, name='q')
         K = tf.compat.v1.layers.dense(flat, d_model, name='k')
         V = tf.compat.v1.layers.dense(flat, d_model, name='v')
 
-        # Numerical stability: scale + mask + clip
+        # stable scaled dot-product
         eps = 1e-8
-        scores = tf.matmul(Q, K, transpose_b=True) / tf.sqrt(tf.cast(d_model, tf.float32) + eps)
-        A = tf.compat.v1.get_collection('adjacency')[0]   # [N, N]
-        mask = tf.cast(A > 0, tf.bool)
-        mask = tf.tile(tf.expand_dims(mask, 0), [B * T, 1, 1])
-        scores = tf.where(mask, scores, tf.fill(tf.shape(scores), -1e9))
-        scores = tf.clip_by_value(scores, -1e9, 1e9)
+        scores = tf.matmul(Q, K, transpose_b=True) / tf.sqrt(tf.cast(d_model,tf.float32) + eps)
+        scores = scores - tf.reduce_max(scores, axis=-1, keepdims=True)
+        exp_s = tf.exp(scores)
+        exp_s = exp_s + eps
+        weights = exp_s / tf.reduce_sum(exp_s, axis=-1, keepdims=True)
+        weights = tf.clip_by_value(weights, 1e-6, 1.0 - 1e-6)
+        sanitized = tf.where(tf.math.is_finite(weights), weights, tf.zeros_like(weights))
+        tf.compat.v1.summary.histogram(f'{scope}/weights', sanitized)
 
-        weights = tf.nn.softmax(scores, axis=-1)
-        weights = tf.clip_by_value(weights, 0.0, 1.0)
-        weights = tf.debugging.check_numerics(
-            weights,
-            message=f"{scope}/graph_attention_weights contains NaN or Inf"
-        )
-        tf.compat.v1.summary.histogram(f'{scope}/graph_attention_weights', weights)
+        attn = tf.matmul(sanitized, V)
+        attn = tf.reshape(attn, [B, N, T, d_model])
+        attn = tf.transpose(attn, [0,2,1,3])
 
-        attn = tf.matmul(weights, V)
+        out = layer_norm(attn + x_in, scope+'_ln')
+        return tf.nn.dropout(out, keep_prob)
+
+# Graph Attention (Masked by adjacency)
+
+def graph_attention_layer(x, d_model, keep_prob, scope='graph_att'):
+    with tf.compat.v1.variable_scope(scope):
+        B = tf.shape(x)[0]; T = tf.shape(x)[1]; N = tf.shape(x)[2]
+        C = x.get_shape().as_list()[3]
+        x_in = x
+        flat = tf.reshape(x, [B*T, N, C])
+        Q = tf.compat.v1.layers.dense(flat, d_model, name='q')
+        K = tf.compat.v1.layers.dense(flat, d_model, name='k')
+        V = tf.compat.v1.layers.dense(flat, d_model, name='v')
+
+        eps = 1e-8
+        scores = tf.matmul(Q, K, transpose_b=True) / tf.sqrt(tf.cast(d_model,tf.float32) + eps)
+        A = tf.compat.v1.get_collection('adjacency')[0]       # [N,N]
+        mask = tf.tile(tf.expand_dims(A>0,0), [B*T,1,1])
+        inf_mask = tf.fill(tf.shape(scores), -1e9)
+        scores = tf.where(mask, scores, inf_mask)
+        scores = scores - tf.reduce_max(scores, axis=-1, keepdims=True)
+        exp_s = tf.exp(scores); exp_s = exp_s + eps
+        weights = exp_s / tf.reduce_sum(exp_s, axis=-1, keepdims=True)
+        weights = tf.clip_by_value(weights, 1e-6, 1.0 - 1e-6)
+        sanitized = tf.where(tf.math.is_finite(weights), weights, tf.zeros_like(weights))
+        tf.compat.v1.summary.histogram(f'{scope}/weights', sanitized)
+
+        attn = tf.matmul(sanitized, V)
         attn = tf.reshape(attn, [B, T, N, d_model])
 
-        out = attn + x_in
-        out = layer_norm(out, scope + '_ln')
+        out = layer_norm(attn + x_in, scope+'_ln')
         return tf.nn.dropout(out, keep_prob)
 
 
